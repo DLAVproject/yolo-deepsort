@@ -18,7 +18,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tensorflow.compat.v1 import ConfigProto
 from tensorflow.compat.v1 import InteractiveSession
-from helpers_alaa import *
 # deep sort imports
 from deep_sort import preprocessing, nn_matching
 from deep_sort.detection import Detection
@@ -39,45 +38,6 @@ flags.DEFINE_boolean('dont_show', False, 'dont show video output')
 flags.DEFINE_boolean('info', False, 'show detailed info of tracked objects')
 flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
-def initalize(frame):
-    ctx = mx.cpu()
-    detector_name = "ssd_512_mobilenet1.0_coco"
-    detector_fast = get_model(detector_name, pretrained=True, ctx=ctx)
-
-    detector_fast.reset_class(classes=['person'], reuse_weights={'person':'person'})
-    detector_fast.hybridize()
-
-    pose_net_fast = get_model('simple_pose_resnet18_v1b', pretrained='ccd24037', ctx=ctx)
-    pose_net_fast.hybridize()
-
-    predicted_heatmap = pose_net_fast(pose_input)
-    pred_coords, confidence = heatmap_to_coord(predicted_heatmap, upscale_bbox)
-
-    x, frame = gcv.data.transforms.presets.ssd.transform_test(frame, short=512, max_size=350)
-    x = x.as_in_context(ctx)
-    class_IDs, scores, bounding_boxs = detector_fast(x)
-
-    pose_input, upscale_bbox = detector_to_simple_pose(frame, class_IDs, scores, bounding_boxs,
-                                                           output_shape=(128, 96), ctx=ctx) 
-
-    img = cv_plot_keypoints(frame, pred_coords, confidence, class_IDs, bounding_boxs, scores,
-            box_thresh=1, keypoint_thresh=0.2) 
-
-    for idx, skeleton in enumerate(pred_coords):
-        action_label = classifyPose(skeleton.asnumpy()) 
-        if action_label == 'Power to the People' and scores[0, idx] > 0.8:
-    
-            bbox_trigger = bounding_boxs[0].asnumpy()
-            top_left = (int(bbox_trigger[idx,0]),int(bbox_trigger[idx,1]))
-            bottom_right = (int(bbox_trigger[idx,2]),int(bbox_trigger[idx,3]))
-            img = cv2.rectangle(img, top_left, bottom_right, (0,255,0), 2)
-            cv2.putText(img, 'Triggered', (top_left[0], top_left[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (36,255,12), 2)
-            
-            box_prev = bbox_trigger[idx,:]
-            triggered = True
-            break
-    if triggered == True:
-        return bbox
 
 
 def main(_argv):
