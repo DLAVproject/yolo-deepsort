@@ -42,7 +42,7 @@ flags.DEFINE_boolean('count', False, 'count objects being tracked on screen')
 
 def main(_argv):
     # Definition of the parameters
-    max_cosine_distance = 0.2
+    max_cosine_distance = 0.05
     nn_budget = None
     nms_max_overlap = 1.0
     
@@ -83,6 +83,7 @@ def main(_argv):
 
     out = None
 
+
     # get video ready to save locally if flag is set
     if FLAGS.output:
         # by default VideoCapture returns float instead of int
@@ -93,148 +94,289 @@ def main(_argv):
         out = cv2.VideoWriter(FLAGS.output, codec, fps, (width, height))
 
     frame_num = 0
+    
+    detected = False # Flag for initial detection
+
+    # Calculate angle given three landmarks
+    def calculateAngle(landmark1, landmark2, landmark3):
+        '''
+        This function calculates angle between three different landmarks.
+        Args:
+            landmark1: The first landmark containing the x,y and z coordinates.
+            landmark2: The second landmark containing the x,y and z coordinates.
+            landmark3: The third landmark containing the x,y and z coordinates.
+        Returns:
+            angle: The calculated angle between the three landmarks.
+
+        '''
+
+        # Get the required landmarks coordinates.
+        x1, y1 = landmark1
+        x2, y2 = landmark2
+        x3, y3 = landmark3
+
+        # Calculate the angle between the three points
+        angle = math.degrees(math.atan2(y3 - y2, x3 - x2) - math.atan2(y1 - y2, x1 - x2))
+        angle = np.abs(angle)
+        # Check if the angle is less than zero.
+        if angle > 180.0:
+
+            angle = 360-angle
+        
+        # Return the calculated angle.
+        return angle
+    import mediapipe as mp
+    import math
+
+    # Simplifying variables
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+
+    with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+
     # while video is running
-    while True:
-        return_value, frame = vid.read()
-        if return_value:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame)
-        else:
-            print('Video has ended or failed, try a different video format!')
-            break
-        frame_num +=1
-        print('Frame #: ', frame_num)
-        frame_size = frame.shape[:2]
-        image_data = cv2.resize(frame, (input_size, input_size))
-        image_data = image_data / 255.
-        image_data = image_data[np.newaxis, ...].astype(np.float32)
-        start_time = time.time()
-
-        # run detections on tflite if flag is set
-        if FLAGS.framework == 'tflite':
-            interpreter.set_tensor(input_details[0]['index'], image_data)
-            interpreter.invoke()
-            pred = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
-            # run detections using yolov3 if flag is set
-            if FLAGS.model == 'yolov3' and FLAGS.tiny == True:
-                boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25,
-                                                input_shape=tf.constant([input_size, input_size]))
+        #feat_prev = []
+        while True:
+            return_value, frame = vid.read()
+            if return_value:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(frame)
             else:
-                boxes, pred_conf = filter_boxes(pred[0], pred[1], score_threshold=0.25,
-                                                input_shape=tf.constant([input_size, input_size]))
-        else:
-            batch_data = tf.constant(image_data)
-            pred_bbox = infer(batch_data)
-            for key, value in pred_bbox.items():
-                boxes = value[:, :, 0:4]
-                pred_conf = value[:, :, 4:]
+                print('Video has ended or failed, try a different video format!')
+                break
+            frame_num +=1
+            #print('Frame #: ', frame_num)
+            frame_size = frame.shape[:2]
+            image_data = cv2.resize(frame, (input_size, input_size))
+            image_data = image_data / 255.
+            image_data = image_data[np.newaxis, ...].astype(np.float32)
+            start_time = time.time()
+            if not detected:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                frame.flags.writeable = False
+                results = pose.process(frame)
+                if results.pose_landmarks is None:
+                    cv2.imshow("Output Video", frame)
+                    continue
+                landmarks = np.asarray([
+                    results.pose_landmarks.landmark[12], # Right shoulder
+                    results.pose_landmarks.landmark[14], # Right elbow
+                    results.pose_landmarks.landmark[16], # Right wrist
+                    results.pose_landmarks.landmark[24] # Right hip
+                ])
+                frame.flags.writeable = True
+                mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                
+                
+                right_elbow_angle = calculateAngle((landmarks[0].x, landmarks[0].y), 
+                                                    (landmarks[1].x, landmarks[1].y),
+                                                    (landmarks[2].x, landmarks[2].y))
 
-        boxes, scores, classes, valid_detections = tf.image.combined_non_max_suppression(
-            boxes=tf.reshape(boxes, (tf.shape(boxes)[0], -1, 1, 4)),
-            scores=tf.reshape(
-                pred_conf, (tf.shape(pred_conf)[0], -1, tf.shape(pred_conf)[-1])),
-            max_output_size_per_class=50,
-            max_total_size=50,
-            iou_threshold=FLAGS.iou,
-            score_threshold=FLAGS.score
-        )
+                right_shoulder_angle = calculateAngle((landmarks[3].x, landmarks[3].y), 
+                                                    (landmarks[0].x, landmarks[0].y),
+                                                    (landmarks[1].x, landmarks[1].y))
 
-        # convert data to numpy arrays and slice out unused elements
-        num_objects = valid_detections.numpy()[0]
-        bboxes = boxes.numpy()[0]
-        bboxes = bboxes[0:int(num_objects)]
-        scores = scores.numpy()[0]
-        scores = scores[0:int(num_objects)]
-        classes = classes.numpy()[0]
-        classes = classes[0:int(num_objects)]
+                P2TP_mask = (50 < right_elbow_angle < 130) & (70 < right_shoulder_angle < 110)
+                
+                
+                if P2TP_mask:
+                    height, width = frame.shape[:2]
+                    x = [l.x*width for l in results.pose_landmarks.landmark]
+                    y = [l.y*height for l in results.pose_landmarks.landmark]
+                    # print(f'Height: {height}, width: {width}')
+                    # for i, (xi, yi) in enumerate(zip(x, y)):
+                    #     print(f'i: {i} -> (x, y): {xi}, {yi}')
+                    
+                    
+                    # Hardcoding
 
-        # format bounding boxes from normalized ymin, xmin, ymax, xmax ---> xmin, ymin, width, height
-        original_h, original_w, _ = frame.shape
-        bboxes = utils.format_boxes(bboxes, original_h, original_w)
+                    top_left = np.asarray([results.pose_landmarks.landmark[20].x * width, 
+                                           results.pose_landmarks.landmark[20].y * height])
+                    bottom_right = np.asarray([results.pose_landmarks.landmark[11].x * width, height])
 
-        # store all predictions in one parameter for simplicity when calling functions
-        pred_bbox = [bboxes, scores, classes, num_objects]
+                    # Using min / max of all coordinates
+                   
+                    # center = np.array([np.mean(x)*width, np.mean(y)*height]).astype('int32')
+                    # cv2.circle(frame, tuple(center), 10, (255,0,0), 1)  #for checking the center 
+                    # top_left = np.array([np.min(x)*width, np.min(y)*height]).astype('int32')
+                    # bottom_right = np.array([np.max(x)*width, np.max(y)*height]).astype('int32')
 
-        # read in all class names from config
-        class_names = utils.read_class_names(cfg.YOLO.CLASSES)
+                    # Using cv2.boundingRect
 
-        # by default allow all classes in .names file
-        allowed_classes = list(class_names.values())
-        
-        # custom allowed classes (uncomment line below to customize tracker for only people)
-        #allowed_classes = ['person']
+                    # cnt = np.asarray(list(zip(x, y)))
+                    # x,y,_,_ = cv2.boundingRect(cnt.astype(np.int))
+                    # center = np.array([x, y]).astype('int32')
+                    # cv2.circle(frame, tuple(center), 10, (255,0,0), 1)  #for checking the center 
+                    # top_left = np.array([x, y]).astype('int32')
+                    # bottom_right = np.array([(x+width), (y+height)]).astype('int32')
+                    # cv2.rectangle(frame, tuple(top_left), tuple(bottom_right), (255,0,0), 2)
+                    # cv2.putText(frame, str((center[0]-200,center[1]-200)), (20, 70), cv2.FONT_HERSHEY_PLAIN, 3, (0, 196, 255), 2)
+                    
+                    bboxes = np.hstack((top_left, bottom_right))[None] # expand dims 
+                    scores = np.asarray([1]) # TODO: Retrieve proper score from mediapipe
+                    names = np.asarray(['person'])
+                
+                    first_bbox = bboxes.copy()
 
-        # loop through objects and use class index to get class name, allow only classes in allowed_classes list
-        names = []
-        deleted_indx = []
-        for i in range(num_objects):
-            class_indx = int(classes[i])
-            class_name = class_names[class_indx]
-            if class_name not in allowed_classes:
-                deleted_indx.append(i)
+                    detected = True
+
+                    cv2.imshow("Output Video", frame)
+                else:
+                    
+                    cv2.imshow("Output Video", frame)
+                    cv2.waitKey(1)
+                    continue
+
+                
+
             else:
-                names.append(class_name)
-        names = np.array(names)
-        count = len(names)
-        if FLAGS.count:
-            cv2.putText(frame, "Objects being tracked: {}".format(count), (5, 35), cv2.FONT_HERSHEY_COMPLEX_SMALL, 2, (0, 255, 0), 2)
-            print("Objects being tracked: {}".format(count))
-        # delete detections that are not in allowed_classes
-        bboxes = np.delete(bboxes, deleted_indx, axis=0)
-        scores = np.delete(scores, deleted_indx, axis=0)
+                # run detections on tflite if flag is set
+                if FLAGS.framework == 'tflite':
+                    interpreter.set_tensor(input_details[0]['index'], image_data)
+                    interpreter.invoke()
+                    pred = [interpreter.get_tensor(output_details[i]['index']) for i in range(len(output_details))]
+                    # run detections using yolov3 if flag is set
+                    if FLAGS.model == 'yolov3' and FLAGS.tiny == True:
+                        boxes, pred_conf = filter_boxes(pred[1], pred[0], score_threshold=0.25,
+                                                        input_shape=tf.constant([input_size, input_size]))
+                    else:
+                        boxes, pred_conf = filter_boxes(pred[0], pred[1], score_threshold=0.25,
+                                                        input_shape=tf.constant([input_size, input_size]))
+                else:
+                    batch_data = tf.constant(image_data)
+                    # print(batch_data.shape)
+                    # print(frame.shape)
+                    pred_bbox = infer(batch_data)
+                    for key, value in pred_bbox.items():
+                        boxes = value[:, :, 0:4]
+                        pred_conf = value[:, :, 4:]
 
-        # encode yolo detections and feed to tracker
-        features = encoder(frame, bboxes)
-        detections = [Detection(bbox, score, class_name, feature) for bbox, score, class_name, feature in zip(bboxes, scores, names, features)]
+                boxes, scores, classes, valid_detections = tf.image.combined_non_max_suppression(
+                    boxes=tf.reshape(boxes, (tf.shape(boxes)[0], -1, 1, 4)),
+                    scores=tf.reshape(
+                        pred_conf, (tf.shape(pred_conf)[0], -1, tf.shape(pred_conf)[-1])),
+                    max_output_size_per_class=50,
+                    max_total_size=50,
+                    iou_threshold=FLAGS.iou,
+                    score_threshold=FLAGS.score
+                )
 
-        #initialize color map
-        cmap = plt.get_cmap('tab20b')
-        colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
+                # convert data to numpy arrays and slice out unused elements
+                num_objects = valid_detections.numpy()[0]
+                bboxes = boxes.numpy()[0]
+                bboxes = bboxes[0:int(num_objects)]
+                scores = scores.numpy()[0]
+                scores = scores[0:int(num_objects)]
+                classes = classes.numpy()[0]
+                classes = classes[0:int(num_objects)]
 
-        # run non-maxima supression
-        boxs = np.array([d.tlwh for d in detections])
-        scores = np.array([d.confidence for d in detections])
-        classes = np.array([d.class_name for d in detections])
-        indices = preprocessing.non_max_suppression(boxs, classes, nms_max_overlap, scores)
-        detections = [detections[i] for i in indices]       
+                # format bounding boxes from normalized ymin, xmin, ymax, xmax ---> xmin, ymin, width, height
+                original_h, original_w, _ = frame.shape
+                bboxes = utils.format_boxes(bboxes, original_h, original_w)
 
-        # Call the tracker
-        tracker.predict()
-        tracker.update(detections)
-        tracker.tracks = [t for t in tracker.tracks if (t.track_id==1)]
+                first_bbox = bboxes
 
-        # update tracks
-        for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue 
-            bbox = track.to_tlbr()
-            class_name = track.get_class()
-            print('hei')
+                # store all predictions in one parameter for simplicity when calling functions
+                pred_bbox = [bboxes, scores, classes, num_objects]
+
+
+                # read in all class names from config
+                class_names = utils.read_class_names(cfg.YOLO.CLASSES)
+
+                # by default allow all classes in .names file
+                allowed_classes = list(class_names.values())
+                
+                # custom allowed classes (uncomment line below to customize tracker for only people)
+                #allowed_classes = ['person']
+
+                # loop through objects and use class index to get class name, allow only classes in allowed_classes list
+                names = []
+                deleted_indx = []
+                for i in range(num_objects):
+                    class_indx = int(classes[i])
+                    class_name = class_names[class_indx]
+                    if class_name not in allowed_classes:
+                        deleted_indx.append(i)
+                    else:
+                        names.append(class_name)
+                names = np.array(names)
+                count = len(names)
+                if FLAGS.count:
+                    cv2.putText(frame, "Objects being tracked: {}".format(count), (5, 35), cv2.FONT_HERSHEY_COMPLEX_SMALL, 2, (0, 255, 0), 2)
+                    print("Objects being tracked: {}".format(count))
+                # delete detections that are not in allowed_classes
+                bboxes = np.delete(bboxes, deleted_indx, axis=0)
+                scores = np.delete(scores, deleted_indx, axis=0)
+
+            # encode yolo detections and feed to tracker
+            features = encoder(frame, bboxes)
+            detections = [Detection(bbox, score, class_name, feature) for bbox, score, class_name, feature in zip(bboxes, scores, names, features)]
             
-        # draw bbox on screen
-            color = colors[int(track.track_id) % len(colors)]
-            color = [i * 255 for i in color]
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
-            cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
-            cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+            
+            #from deep_sort.nn_matching import _cosine_distance
 
-        # if enable info flag then print details about each track
-            if FLAGS.info:
-                print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+            #print(f'Cosine distance: {_cosine_distance(features, encoder(frame, first_bbox))}')
 
-        # calculate frames per second of running detections
-        fps = 1.0 / (time.time() - start_time)
-        print("FPS: %.2f" % fps)
-        result = np.asarray(frame)
-        result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        
-        if not FLAGS.dont_show:
-            cv2.imshow("Output Video", result)
-        
-        # if output flag is set, save video file
-        if FLAGS.output:
-            out.write(result)
-        if cv2.waitKey(1) & 0xFF == ord('q'): break
+
+
+
+            #initialize color map
+            cmap = plt.get_cmap('tab20b')
+            colors = [cmap(i)[:3] for i in np.linspace(0, 1, 20)]
+
+            # run non-maxima supression
+            boxs = np.array([d.tlwh for d in detections])
+            scores = np.array([d.confidence for d in detections])
+            classes = np.array([d.class_name for d in detections])
+            indices = preprocessing.non_max_suppression(boxs, classes, nms_max_overlap, scores)
+            detections = [detections[i] for i in indices]       
+
+            # Call the tracker
+            tracker.predict()
+            tracker.update(detections)
+
+            tracker.tracks = [t for t in tracker.tracks if (t.track_id==1)]
+
+            # update tracks
+            for track in tracker.tracks:
+                #if feat_prev == track.features:
+                #    print("same")
+                #else:
+                #    print("different")
+                #feat_prev = track.features
+                #if not track.is_confirmed() or track.time_since_update > 1:
+                #    continue 
+                bbox = track.to_tlbr()
+                class_name = track.get_class()
+                
+            # draw bbox on screen
+                color = colors[int(track.track_id) % len(colors)]
+                color = [i * 255 for i in color]
+                cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2)
+                cv2.rectangle(frame, (int(bbox[0]), int(bbox[1]-30)), (int(bbox[0])+(len(class_name)+len(str(track.track_id)))*17, int(bbox[1])), color, -1)
+                cv2.putText(frame, class_name + "-" + str(track.track_id),(int(bbox[0]), int(bbox[1]-10)),0, 0.75, (255,255,255),2)
+
+            # if enable info flag then print details about each track
+                if FLAGS.info:
+                    print("Tracker ID: {}, Class: {},  BBox Coords (xmin, ymin, xmax, ymax): {}".format(str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+
+            # calculate frames per second of running detections
+            fps = 1.0 / (time.time() - start_time)
+            #print("FPS: %.2f" % fps)
+            result = np.asarray(frame)
+            result = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
+            if not FLAGS.dont_show:
+                cv2.waitKey(1)
+                cv2.imshow("Output Video", result)
+            
+            # if output flag is set, save video file
+            if FLAGS.output:
+                out.write(result)
+            if cv2.waitKey(1) & 0xFF == ord('q'): 
+                break
+
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':

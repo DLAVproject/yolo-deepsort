@@ -71,6 +71,7 @@ class Track:
         self.hits = 1
         self.age = 1
         self.time_since_update = 0
+        self.count_init = 0
 
         self.state = TrackState.Tentative
         self.features = []
@@ -141,7 +142,14 @@ class Track:
         """
         self.mean, self.covariance = kf.update(
             self.mean, self.covariance, detection.to_xyah())
-        self.features.append(detection.feature)
+        
+        if self.count_init < 100:
+            self.features.append(detection.feature)
+            self.count_init += 1
+        
+        if self.count_init == 100:
+            print("Finished with initializing ReID")
+            self.count_init += 1
 
         self.hits += 1
         self.time_since_update = 0
